@@ -1,18 +1,16 @@
-# Password Strength Analyzer
+# Password Strength Analyzer — SIS Checkpoint 2
 
-A synchronous, in-memory Go application for **SIS Checkpoint 1 (Core Go)**. Each task analyzes a sample password, produces a simple strength report, and tracks its processing status.
+Go application for **Golang Application Development, SIS Checkpoint 2: Concurrent Processing**. This extends the Checkpoint 1 project: tasks still contain passwords, the analyzer still calculates their character statistics and educational strength rating, and tasks are still held in memory. Checkpoint 2 adds a bounded queue, a reusable worker pool, thread-safe task storage, and controlled shutdown.
 
-> **Educational project:** The score measures a few character properties, not actual resistance to password attacks. Use fictional sample passwords only. In this checkpoint, raw task input is retained in memory and must not be used for real passwords.
+> **Safety:** This is a course demonstration, not a production password checker. It retains submitted password strings in memory until the service exits, so **use invented sample passwords only**. Do not log or send real credentials. The 0–5 scoring system is a simple teaching exercise, not a real security estimate.
 
-## Features
+## Requirements
 
-- Create a task from a password string and assign a unique integer ID.
-- Reject empty or whitespace-only input.
-- Store multiple tasks and their results independently in memory.
-- Retrieve a task by its ID, or return an error if it does not exist.
-- Process a pending task and store its analysis result.
-- Track task status, with errors for invalid operations such as processing a completed task again.
-- Test the main application behavior using Go's standard `testing` package.
+- Go **1.27**, as specified by the course
+- No third-party dependencies
+- No database, HTTP server, or external queue
+
+The module path in `go.mod` is `password-strength-analyzer`. All imports use that module path. If you change it to your GitHub path, update the imports too.
 
 ## Project structure
 
@@ -21,131 +19,137 @@ password-strength-analyzer/
 ├── go.mod
 ├── main.go
 ├── README.md
+├── .gitignore
 └── internal/
     ├── task/
     │   ├── task.go
-    │   └── task_test.go            # Optional if no task-specific tests are needed
+    │   └── task_test.go
     ├── analyzer/
     │   ├── analyzer.go
     │   └── analyzer_test.go
     └── service/
         ├── service.go
-        └── service_test.go
+        ├── service_test.go
+        ├── worker.go
+        └── worker_test.go
 ```
 
-- `task`: defines task status, input, and analysis result types.
-- `analyzer`: defines the `Analyzer` interface and implements password analysis.
-- `service`: creates, stores, retrieves, and processes tasks.
-- `main.go`: demonstrates the application with fictional passwords.
+## Domain logic (preserved from Checkpoint 1)
+
+Each `Task` has an integer ID, password input, status, optional `Result`, and optional error message. IDs increase within one in-memory `Service` instance. The analyzer awards one point for each rule:
+
+1. Password length is at least 8 Unicode characters.
+2. Has at least one uppercase letter.
+3. Has at least one lowercase letter.
+4. Has at least one digit.
+5. Has at least one punctuation or symbol character.
+
+Scores `0–2` are **Weak**, `3–4` are **Medium**, and `5` is **Strong**. Empty/whitespace-only inputs are rejected with errors.
+
+## Concurrent architecture
+
+```text
+main goroutine
+  CreateTask(password) ──> map[int]*Task (protected by sync.RWMutex)
+  SubmitTask(id) ────────> buffered chan int (capacity 10)
+                                    │
+                               ┌────┴────┐
+                               ▼         ▼
+                            Worker 1  Worker 2
+                               │         │
+                          Analyze()  Analyze()    (overlap is allowed)
+                               │         │
+                               └────┬────┘
+                                    ▼
+                             task results and states
+                             (protected by sync.RWMutex)
+```
+
+`main.go` starts **2 workers** with a **queue capacity of 10**. Worker count and capacity are configurable via `s.Start(workers, queueCapacity)`; the number of workers must be at least 2 and capacity must be positive.
+
+- Workers are **fixed and reusable**, not one goroutine per task.
+- The **buffered channel** stores task IDs awaiting processing.
+- `SubmitTask` is **non-blocking**: if the channel is full, it returns `ErrQueueFull`. The rejected task **stays Pending**; the queue does not grow and no additional goroutine is created.
+- The service holds `s.mu` across the submission state check, channel send, and status update. This prevents duplicate submission and races with shutdown closing the channel.
+- A worker transitions `Queued → Processing` under the mutex, releases it while calling `Analyze`, then locks again to write `Result`, `Error`, and final status.
+- `GetTask` takes `RLock` and returns an independent copy of the task and result, avoiding external mutation or races.
+- Different workers may complete tasks out of order. Tests never assume a fixed completion order.
 
 ## Task lifecycle
 
 ```text
-Pending -> Processing -> Completed
-              |
-              | analysis returns an error
-              v
-            Pending
+CreateTask                  SubmitTask                 Worker
+   │                            │                        │
+   ▼                            ▼                        ▼
+Pending ────────────────> Queued ────────────────> Processing
+                                                        │
+                                           ┌────────────┴───────────┐
+                                           ▼                        ▼
+                                        Completed                 Failed
+                                        (has result)              (has error)
 ```
 
-- **Pending:** the task was created but has not been processed.
-- **Processing:** the service has started analyzing the task.
-- **Completed:** processing succeeded and the result is stored.
-- Only a **Pending** task may be processed.
-- Processing a **Completed** or **Processing** task again returns an error.
-- If the analyzer returns an error, the current implementation moves the task back to **Pending** for a potential retry.
-- Creating a task with empty or whitespace-only input returns an error; fetching an unknown task ID also returns an error.
+Only **Pending** tasks can be submitted. Attempts to submit a `Queued`, `Processing`, `Completed`, or `Failed` task return `ErrInvalidState`. Once a task is accepted, the worker processes it only once. A failed analysis is recorded with `Failed` status; automatic retries are not implemented.
 
-Checkpoint 1 runs synchronously: the `Processing` state is assigned during the call and is not usually observable from `main.go` while processing is in progress.
+For compatibility with Checkpoint 1, `ProcessTask(id)` still runs synchronously **before** workers are started; after `Start`, it returns `ErrAsyncOnly`. The concurrent Checkpoint 2 path is `SubmitTask(id)`.
 
-## Password analysis rules
+## Startup and shutdown
 
-For each nonblank input, the analyzer checks the following conditions and awards **1 point** for each condition met:
+`Start(2, 10)` starts two worker goroutines (once per service). `Stop()`:
 
-| Condition | Points |
-| --- | ---: |
-| At least 8 Unicode characters | 1 |
-| At least one uppercase letter | 1 |
-| At least one lowercase letter | 1 |
-| At least one digit | 1 |
-| At least one punctuation or symbol character | 1 |
+1. Acquires the same mutex used by `SubmitTask`.
+2. Marks the service stopped, rejecting new task creation, submissions, and restarts.
+3. Closes the queue **once** (only the service closes it).
+4. Lets workers drain every previously accepted task via `for id := range queue`.
+5. Uses `sync.WaitGroup.Wait()` to wait for **all** worker goroutines to exit.
 
-The score ranges from 0 to 5:
+Repeated or concurrent calls to `Stop()` are safe. No task accepted into the queue is silently discarded by normal shutdown. `Stop` waits for running analysis to finish; cancellation/timeouts are intentionally outside Checkpoint 2.
 
-| Score | Label |
-| --- | --- |
-| 0–2 | Weak |
-| 3–4 | Medium |
-| 5 | Strong |
+## Running
 
-The result also includes length and Boolean flags for uppercase, lowercase, digits, and special characters.
-
-Example (fictional input):
-
-```text
-Input: "Hello123!"
-Status before processing: pending
-Status after processing: completed
-Length: 9
-Score: 5
-Strength: Strong
-```
-
-## Requirements
-
-- **Go 1.27**, as specified by the course.
-- No database, HTTP server, external API, or third-party package is needed for Checkpoint 1.
-
-## Run
-
-From the project root (the directory containing `go.mod`):
+From the project root:
 
 ```bash
 go version
 go run .
 ```
 
-The included `main.go` demonstration creates and processes several independent sample tasks.
+`main.go` creates fictional sample passwords, submits them, calls `Stop()` to finish accepted jobs, then prints IDs, statuses, scores and strengths (never raw passwords).
 
-## Test and verify
+## Testing
 
 ```bash
-# Format source files if needed
-gofmt -w .
+gofmt -l .          # should show no filenames
+go vet ./...        # should succeed
+go test ./...       # should pass
+go test -race ./... # must report no data races
+```
 
-# This should print nothing after formatting
-gofmt -l .
+For more detailed output:
 
-# Run static checks
-go vet ./...
-
-# Run all unit tests
-go test ./...
-
-# Show individual test results
+```bash
 go test -v ./...
 ```
 
-The tests cover successful and invalid task creation, task retrieval, missing IDs, processing and result correctness, status transitions, processing a completed task, and independence of multiple tasks. The analyzer tests use table-driven cases.
+Tests cover the nine Checkpoint 1 cases and the Checkpoint 2 requirements: worker startup, successful submission, multi-task processing and distinct results, actual overlap of two analyses, status transitions, duplicate rejection, bounded/full queue, concurrent map access, shutdown drain and worker termination, rejection after shutdown, and concurrent `SubmitTask`/`Stop` safety. The overlap test uses blocking test-controlled channels, **not `time.Sleep`**; a timeout exists only to fail if progress stops.
 
-## Core Go concepts used
+## Files and responsibilities
 
-| Concept | Where it is demonstrated |
+| File | Responsibility |
 | --- | --- |
-| Structs | `task.Task`, `task.Result`, `service.Service`, `analyzer.PasswordAnalyzer` |
-| Methods | `Analyze`, `CreateTask`, `GetTask`, `ProcessTask` |
-| Interface | `analyzer.Analyzer` describes the `Analyze` behavior; `PasswordAnalyzer` and a test fake implement it |
-| Map | `map[int]*task.Task` stores tasks by unique ID |
-| Slice | `[]string` in `main.go`; test case slices in table-driven tests |
-| Value semantics | `PasswordAnalyzer.Analyze` has a value receiver; `copyTask` duplicates task values and results |
-| Pointer semantics | `*Service` method receivers; pointers to stored tasks and results |
-| Error handling | `(..., error)` returns, `if err != nil`, and wrapped processing errors |
-| Code organization | Separate `internal/task`, `internal/analyzer`, and `internal/service` packages |
+| `internal/task/task.go` | Task, status, result domain types |
+| `internal/analyzer/analyzer.go` | Analyzer interface and five-rule scoring algorithm |
+| `internal/service/service.go` | Task creation/retrieval, synchronization, synchronous compatibility method |
+| `internal/service/worker.go` | Worker pool, bounded queue, submission, safe shutdown |
+| `internal/**/**/*_test.go` | Automated tests |
+| `main.go` | Runnable Checkpoint 2 demo |
 
-## Scope and limitations
+## Key points for the individual defense
 
-- All data is lost when the process exits.
-- Processing is synchronous and **not concurrency-safe** yet.
-- The score is a simple teaching example, not a professional password-security estimate.
-- Never enter real credentials in this example because raw input is currently retained in application memory.
-- Concurrency and an HTTP API are intentionally left for later checkpoints.
+- **Why use channels?** A buffered channel is a bounded queue that communicates task IDs to reusable worker goroutines.
+- **Why use `RWMutex`?** Concurrent map access and task status/result mutation must be synchronized. `RLock` allows concurrent task snapshots.
+- **Why release the lock during analysis?** Workers can perform independent analyses simultaneously; task retrieval is not blocked by a long analysis.
+- **How are duplicates prevented?** The task state check and queue submission occur under a single lock; only Pending tasks may enter the queue.
+- **What happens when the queue is full?** `ErrQueueFull` is returned immediately; the task remains Pending.
+- **How do workers stop?** `Stop` closes the queue once after submissions are disabled; workers drain the channel and exit; `WaitGroup` joins them.
+- **What can go wrong without synchronization?** Data races, corrupted map accesses, duplicate processing, or a panic when sending to a closed channel.

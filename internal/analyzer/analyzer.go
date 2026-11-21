@@ -9,20 +9,22 @@ import (
 	"github.com/Uakks/sis-project/internal/task"
 )
 
+// Analyzer allows the service to accept different analyzer implementations,
+// including test fakes that can coordinate concurrent worker tests.
 type Analyzer interface {
 	Analyze(password string) (task.Result, error)
 }
 
+// PasswordAnalyzer applies a simple five-rule educational scoring model.
+// The score is not an estimate of real-world password security.
 type PasswordAnalyzer struct{}
 
-func (a PasswordAnalyzer) Analyze(password string) (task.Result, error) {
+func (PasswordAnalyzer) Analyze(password string) (task.Result, error) {
 	if strings.TrimSpace(password) == "" {
-		return task.Result{}, errors.New("password cannot be empty")
+		return task.Result{}, errors.New("password cannot be empty or whitespace-only")
 	}
 
-	result := task.Result{
-		Length: utf8.RuneCountInString(password),
-	}
+	result := task.Result{Length: utf8.RuneCountInString(password)}
 
 	for _, char := range password {
 		switch {

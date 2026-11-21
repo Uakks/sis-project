@@ -3,52 +3,50 @@ package main
 import (
 	"fmt"
 
-	"github.com/Uakks/sis-project/internal/service"
 	"github.com/Uakks/sis-project/internal/analyzer"
+	"github.com/Uakks/sis-project/internal/service"
 )
 
 func main() {
-	// Create analyzer and service
-	a := analyzer.PasswordAnalyzer{}
-	s := service.NewService(a)
-
-	// Sample passwords
-	passwords := []string{
-		"hello",
-		"Hello123",
-		"Hello123!",
+	s := service.NewService(analyzer.PasswordAnalyzer{})
+	if err := s.Start(2, 10); err != nil {
+		fmt.Println("Cannot start:", err)
+		return
 	}
 
-	// Create and process tasks
+	// Use invented sample passwords only, never real credentials.
+	passwords := []string{"hello", "Hello123", "Hello123!", "ABCDE123!"}
+	var ids []int
+
 	for _, password := range passwords {
 		created, err := s.CreateTask(password)
 		if err != nil {
-			fmt.Println("Creation error:", err)
+			fmt.Println("Create failed:", err)
 			continue
 		}
-
-		fmt.Printf("Task %d created\n", created.ID)
-		fmt.Println("Status:", created.Status)
-
-		// Process task
-		if err := s.ProcessTask(created.ID); err != nil {
-			fmt.Println("Processing error:", err)
+		if err := s.SubmitTask(created.ID); err != nil {
+			fmt.Printf("Submit task %d failed: %v\n", created.ID, err)
 			continue
 		}
+		ids = append(ids, created.ID)
+		fmt.Printf("Submitted task %d\n", created.ID)
+	}
 
-		// Retrieve processed task
-		completed, err := s.GetTask(created.ID)
+	// Normal shutdown drains the queue and waits for all workers to finish.
+	s.Stop()
+
+	fmt.Println("\nResults:")
+	for _, id := range ids {
+		item, err := s.GetTask(id)
 		if err != nil {
-			fmt.Println("Retrieval error:", err)
+			fmt.Println(err)
 			continue
 		}
-
-		// Display result
-		fmt.Println("Task ID:", completed.ID)
-		fmt.Println("Status:", completed.Status)
-		fmt.Println("Length:", completed.Result.Length)
-		fmt.Println("Score:", completed.Result.Score)
-		fmt.Println("Strength:", completed.Result.Strength)
-		fmt.Println("-------------------------")
+		if item.Result == nil {
+			fmt.Printf("Task %d: %s (%s)\n", id, item.Status, item.Error)
+			continue
+		}
+		fmt.Printf("Task %d: %s, score %d/5, %s\n",
+			id, item.Status, item.Result.Score, item.Result.Strength)
 	}
 }

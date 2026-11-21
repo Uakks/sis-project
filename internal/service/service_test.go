@@ -1,190 +1,142 @@
 package service
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/Uakks/sis-project/internal/task"
 )
 
-// Fake analyzer for testing the service.
 type fakeAnalyzer struct{}
 
-func (f fakeAnalyzer) Analyze(password string) (task.Result, error) {
-	return task.Result{
-		Length:   len(password),
-		Score:    5,
-		Strength: "Strong",
-	}, nil
+func (fakeAnalyzer) Analyze(password string) (task.Result, error) {
+	return task.Result{Length: len(password), Score: 5, Strength: "Strong"}, nil
+}
+
+type failingAnalyzer struct{}
+
+func (failingAnalyzer) Analyze(string) (task.Result, error) {
+	return task.Result{}, errors.New("analysis failed")
 }
 
 func TestCreateTask(t *testing.T) {
 	s := NewService(fakeAnalyzer{})
-
 	created, err := s.CreateTask("Hello123!")
-
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatal(err)
 	}
-
-	if created.ID <= 0 {
-		t.Error("expected a positive task ID")
-	}
-
-	if created.Status != task.Pending {
-		t.Errorf("expected Pending, got %s", created.Status)
-	}
-
-	if created.Result != nil {
-		t.Error("new task should not have a result")
+	if created.ID != 1 || created.Status != task.Pending || created.Result != nil {
+		t.Errorf("unexpected new task: %+v", created)
 	}
 }
 
 func TestCreateTaskInvalidInput(t *testing.T) {
 	s := NewService(fakeAnalyzer{})
-
-	_, err := s.CreateTask("")
-
-	if err == nil {
-		t.Error("expected error for empty password")
+	for _, password := range []string{"", "   ", "\n"} {
+		if _, err := s.CreateTask(password); err == nil {
+			t.Errorf("expected validation error for %q", password)
+		}
 	}
 }
 
 func TestGetTask(t *testing.T) {
 	s := NewService(fakeAnalyzer{})
-
 	created, err := s.CreateTask("Hello123!")
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	retrieved, err := s.GetTask(created.ID)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if retrieved.ID != created.ID {
-		t.Errorf(
-			"expected ID %d, got %d",
-			created.ID,
-			retrieved.ID,
-		)
+	if err != nil || retrieved.ID != created.ID {
+		t.Fatalf("got task=%+v error=%v; expected ID=%d", retrieved, err, created.ID)
 	}
 }
 
 func TestGetNonexistentTask(t *testing.T) {
 	s := NewService(fakeAnalyzer{})
-
-	_, err := s.GetTask(999)
-
-	if err == nil {
-		t.Error("expected error for nonexistent task")
+	if _, err := s.GetTask(999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
 	}
 }
 
 func TestProcessTask(t *testing.T) {
 	s := NewService(fakeAnalyzer{})
-
 	created, err := s.CreateTask("Hello123!")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	err = s.ProcessTask(created.ID)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := s.ProcessTask(created.ID); err != nil {
+		t.Fatal(err)
 	}
-
-	processed, err := s.GetTask(created.ID)
+	got, err := s.GetTask(created.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	if processed.Status != task.Completed {
-		t.Errorf(
-			"expected Completed, got %s",
-			processed.Status,
-		)
+	if got.Status != task.Completed || got.Result == nil {
+		t.Fatalf("expected completed task with result; got %+v", got)
 	}
-
-	if processed.Result == nil {
-		t.Fatal("expected processing result, got nil")
-	}
-
-	if processed.Result.Score != 5 {
-		t.Errorf(
-			"expected score 5, got %d",
-			processed.Result.Score,
-		)
-	}
-
-	if processed.Result.Length != 9 {
-		t.Errorf(
-			"expected length 9, got %d",
-			processed.Result.Length,
-		)
+	if got.Result.Score != 5 || got.Result.Length != 9 {
+		t.Errorf("unexpected analysis result: %+v", got.Result)
 	}
 }
 
 func TestProcessCompletedTask(t *testing.T) {
 	s := NewService(fakeAnalyzer{})
-
-	created, err := s.CreateTask("Hello123!")
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	created, _ := s.CreateTask("Hello123!")
 	if err := s.ProcessTask(created.ID); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.ProcessTask(created.ID); !errors.Is(err, ErrInvalidState) {
+		t.Errorf("expected ErrInvalidState, got %v", err)
+	}
+}
 
-	err = s.ProcessTask(created.ID)
-
-	if err == nil {
-		t.Error("expected error when processing completed task")
+func TestProcessNonexistentTask(t *testing.T) {
+	s := NewService(fakeAnalyzer{})
+	if err := s.ProcessTask(999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected ErrNotFound, got %v", err)
 	}
 }
 
 func TestMultipleTasks(t *testing.T) {
 	s := NewService(fakeAnalyzer{})
-
-	first, err := s.CreateTask("Hello123!")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	second, err := s.CreateTask("Another123!")
-	if err != nil {
-		t.Fatal(err)
-	}
-
+	first, _ := s.CreateTask("Hello123!")
+	second, _ := s.CreateTask("Another123!")
 	if first.ID == second.ID {
-		t.Error("tasks must have unique IDs")
+		t.Fatal("two tasks received the same ID")
 	}
-
 	if err := s.ProcessTask(first.ID); err != nil {
 		t.Fatal(err)
 	}
+	gotFirst, _ := s.GetTask(first.ID)
+	gotSecond, _ := s.GetTask(second.ID)
+	if gotFirst.Status != task.Completed || gotSecond.Status != task.Pending || gotSecond.Result != nil {
+		t.Errorf("tasks interfered: first=%+v second=%+v", gotFirst, gotSecond)
+	}
+}
 
-	firstTask, err := s.GetTask(first.ID)
-	if err != nil {
+func TestResultIsDefensiveCopy(t *testing.T) {
+	s := NewService(fakeAnalyzer{})
+	created, _ := s.CreateTask("Hello123!")
+	if err := s.ProcessTask(created.ID); err != nil {
 		t.Fatal(err)
 	}
-
-	secondTask, err := s.GetTask(second.ID)
-	if err != nil {
-		t.Fatal(err)
+	copy1, _ := s.GetTask(created.ID)
+	copy1.Status = task.Pending
+	copy1.Result.Score = -100
+	copy2, _ := s.GetTask(created.ID)
+	if copy2.Status != task.Completed || copy2.Result.Score != 5 {
+		t.Errorf("external changes corrupted internal task: %+v", copy2)
 	}
+}
 
-	if firstTask.Status != task.Completed {
-		t.Error("first task should be completed")
+func TestSynchronousAnalysisFailure(t *testing.T) {
+	s := NewService(failingAnalyzer{})
+	created, _ := s.CreateTask("Example123!")
+	if err := s.ProcessTask(created.ID); err == nil {
+		t.Fatal("expected analyzer failure")
 	}
-
-	if secondTask.Status != task.Pending {
-		t.Error("second task should still be pending")
-	}
-
-	if secondTask.Result != nil {
-		t.Error("second task should not have a result yet")
+	got, _ := s.GetTask(created.ID)
+	if got.Status != task.Failed || got.Result != nil || got.Error == "" {
+		t.Errorf("expected failed task with error and no result, got %+v", got)
 	}
 }

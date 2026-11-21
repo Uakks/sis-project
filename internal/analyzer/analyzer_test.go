@@ -1,113 +1,50 @@
 package analyzer
 
-import (
-	"testing"
-)
+import "testing"
 
 func TestAnalyze(t *testing.T) {
 	tests := []struct {
-		name             string
-		password         string
-		expectedScore    int
-		expectedStrength string
+		name     string
+		password string
+		score    int
+		strength string
+		length   int
 	}{
-		{
-			name:             "Strong password",
-			password:         "Hello123!",
-			expectedScore:    5,
-			expectedStrength: "Strong",
-		},
-		{
-			name:             "Medium password",
-			password:         "Hello123",
-			expectedScore:    4,
-			expectedStrength: "Medium",
-		},
-		{
-			name:             "Weak password",
-			password:         "hello",
-			expectedScore:    1,
-			expectedStrength: "Weak",
-		},
+		{"weak", "hello", 1, "Weak", 5},
+		{"medium", "Hello123", 4, "Medium", 8},
+		{"strong", "Hello123!", 5, "Strong", 9},
+		{"unicode rune count", "Éclair12!", 5, "Strong", 9},
 	}
 
-	analyzer := PasswordAnalyzer{}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result, err := analyzer.Analyze(tt.password)
-
+	a := PasswordAnalyzer{}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := a.Analyze(tc.password)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-
-			if result.Score != tt.expectedScore {
-				t.Errorf(
-					"expected score %d, got %d",
-					tt.expectedScore,
-					result.Score,
-				)
-			}
-
-			if result.Strength != tt.expectedStrength {
-				t.Errorf(
-					"expected strength %s, got %s",
-					tt.expectedStrength,
-					result.Strength,
-				)
+			if result.Score != tc.score || result.Strength != tc.strength || result.Length != tc.length {
+				t.Errorf("got score=%d strength=%s length=%d; want score=%d strength=%s length=%d",
+					result.Score, result.Strength, result.Length, tc.score, tc.strength, tc.length)
 			}
 		})
 	}
 }
 
 func TestAnalyzeInvalidInput(t *testing.T) {
-	tests := []struct {
-		name     string
-		password string
-	}{
-		{"Empty password", ""},
-		{"Whitespace only", "   "},
-	}
-
-	analyzer := PasswordAnalyzer{}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := analyzer.Analyze(tt.password)
-
-			if err == nil {
-				t.Error("expected an error, got nil")
-			}
-		})
+	for _, password := range []string{"", "   ", "\n\t"} {
+		if _, err := (PasswordAnalyzer{}).Analyze(password); err == nil {
+			t.Errorf("expected error for whitespace-only input %q", password)
+		}
 	}
 }
 
-func TestAnalyzeResult(t *testing.T) {
-	analyzer := PasswordAnalyzer{}
-
-	result, err := analyzer.Analyze("Hello123!")
-
+func TestAnalyzeCharacterFlags(t *testing.T) {
+	result, err := (PasswordAnalyzer{}).Analyze("Hello123!")
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatal(err)
 	}
-
-	if result.Length != 9 {
-		t.Errorf("expected length 9, got %d", result.Length)
-	}
-
-	if !result.HasUpper {
-		t.Error("expected uppercase characters")
-	}
-
-	if !result.HasLower {
-		t.Error("expected lowercase characters")
-	}
-
-	if !result.HasDigit {
-		t.Error("expected digits")
-	}
-
-	if !result.HasSpecial {
-		t.Error("expected special characters")
+	if !result.HasUpper || !result.HasLower || !result.HasDigit || !result.HasSpecial {
+		t.Errorf("expected all character categories, got %+v", result)
 	}
 }
